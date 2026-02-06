@@ -1,7 +1,7 @@
 """
 Модуль логирования: ежедневные файлы в папке logs,
-сводка успешных записей в папку, автоудаление старше 30 дней.
-Часовой пояс: Moscow.
+сводка успешных и неуспешных записей в папку, автоудаление старше 30 дней.
+Часовой пояс: Moscow. Логи только в файл.
 """
 import os
 import asyncio
@@ -41,7 +41,6 @@ class LogManager:
             return
 
         if today != self._current_date:
-            # Конец дня — пишем итог в старый файл
             if self._current_file_path:
                 summary = (
                     f"{self._current_date} 23:59:59 [SUMMARY] "
@@ -112,7 +111,7 @@ class LogManager:
             pass
 
     async def _cleanup_task(self):
-        """Фоновая задача: запуск cleanup каждый день в 01:00 по Москве."""
+        """Фоновая задача: cleanup каждый день в 01:00 по Москве."""
         while True:
             now = self._get_moscow_now()
             next_run = now.replace(hour=1, minute=0, second=0, microsecond=0)
@@ -123,14 +122,13 @@ class LogManager:
             self.cleanup_old_logs()
 
 
-# Глобальный экземпляр
 log_manager = LogManager()
 
 
 def setup_log_tasks(app):
     """Регистрирует фоновые задачи логирования для aiohttp."""
     async def on_startup(app):
-        log_manager.cleanup_old_logs()  # очистка при старте
+        log_manager.cleanup_old_logs()
         asyncio.create_task(log_manager._cleanup_task())
 
     app.on_startup.append(on_startup)

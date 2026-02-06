@@ -14,14 +14,13 @@ BASE_SERVICE_URL = os.environ["BASE_SERVICE_URL"]
 REG_USER_TOKEN = os.environ["REG_USER_TOKEN"]
 SOAP_URL = os.environ["SOAP_URL"]
 CAS_VALIDATE_URL = os.environ["CAS_VALIDATE_URL"]
-ESIA_OBMEN_DIR = os.environ.get("ESIA_OBMEN_DIR")
+ESIA_OBMEN_DIR = os.environ.get("ESIA_OBMEN_DIR", "/srv/esia_obmen")
 HOST = os.environ.get("HOST", "0.0.0.0")
 PORT = int(os.environ.get("PORT", "1100"))
 
 
 # === ФУНКЦИЯ: ВЫЗОВ SOAP-СЕРВИСА ===
 def get_user_from_soap_service(snils: str):
-    # logging.info(f"Получен снилс для soap: {snils}") #
     snils_clean = "".join(filter(str.isdigit, snils))
     if len(snils_clean) != 11:
         log_manager.log_sync("ERROR", "Некорректный СНИЛС (длина не 11 цифр)")
@@ -70,7 +69,6 @@ def get_user_from_soap_service(snils: str):
         return None
     except etree.XMLSyntaxError:
         log_manager.log_sync("ERROR", "Ответ RegUserService не является валидным XML")
-        # logging.error(f"Сырой ответ:\n{response.text}")  #
         return None
     except Exception:
         log_manager.log_sync("ERROR", "Ошибка при вызове SOAP RegUserService")
@@ -80,10 +78,22 @@ def get_user_from_soap_service(snils: str):
 
 
 # === ФУНКЦИЯ: ОТПРАВКА ДАННЫХ В MAX-БОТА ===
-async def send_to_max_bot(user_id: str, user_data: dict):
+def _delete_user_file(user_id: str) -> None:
+    """Удаляет файл пользователя, если существует. Очистка от старых неудачных попыток."""
+    dir_path = ESIA_OBMEN_DIR or "/srv/esia_obmen"
+    file_path = os.path.join(dir_path, f"{user_id}.txt")
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            log_manager.log_sync("INFO", "Удалён устаревший файл перед новой попыткой")
+    except OSError:
+        pass
+
+
+async def send_to_max_bot(user_id: str, user_data):
     await log_manager.log("INFO", "Запрос на отправку в Max-бот")
 
-    dir_path = ESIA_OBMEN_DIR
+    dir_path = ESIA_OBMEN_DIR or "/srv/esia_obmen"
     file_path = os.path.join(dir_path, f"{user_id}.txt")
     # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # ФИО; телефон; дата рождения; СНИЛС; ОМС; пол
@@ -131,6 +141,14 @@ async def send_to_max_bot(user_id: str, user_data: dict):
         except Exception:
             await log_manager.log("ERROR", "Ошибка парсинга XML")
 
+    if not user_data or birth_date == "null":
+        if not user_data:
+            await log_manager.log("WARNING", "Данные не получены (CAS/SOAP), запись в папку пропущена")
+        else:
+            await log_manager.log("WARNING", "Поле birth_date отсутствует в ответе RegUserService, запись пропущена")
+        await log_manager.log_unsuccessful_write()
+        return None
+
     line = f"{lastname} {firstname} {middlename},{phone},{birth_date},{snils},{policynumber},{gender}\n"
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -149,12 +167,11 @@ async def handle_callback(request):
     # logging.info(f"Полный ответ от CAS: {request.url}") #
     ticket = request.query.get('ticket')  # Тикет возврашенный ЕСИА
     user_id = request.query.get('user_id')  # ID диалога в Максе переданного из бота через ЕСИА
-    # logging.info(f"tiket: {ticket}") #
-    # logging.info(f"user_id: {user_id}") #
     if not ticket or not user_id:
         await log_manager.log("WARNING", "Нет ticket или user_id")
         return web.Response(text="Нет ticket или user_id", status=400)
-    # logging.info(f"Получен ticket: {ticket}, user_id: {user_id}")#
+
+    _delete_user_file(user_id)
 
     # Шаг 1: Отправляем на валидацию ticket в CAS
     async with ClientSession() as session:
@@ -189,7 +206,6 @@ async def handle_callback(request):
     soap_xml = None
     if snils_for_soap:
         soap_xml = get_user_from_soap_service(snils_for_soap)
-        # logging.info(f"Получен снилс от soap: {soap_xml}") #
     else:
         await log_manager.log("WARNING", "СНИЛС не получен")
 
@@ -206,7 +222,6 @@ async def handle_callback(request):
 # === ЗАПУСК ===
 app = web.Application()
 app.router.add_get('/auth/cascallback', handle_callback)
-
 setup_log_tasks(app)
 
 if __name__ == '__main__':
