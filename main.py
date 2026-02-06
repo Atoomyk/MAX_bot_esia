@@ -80,10 +80,22 @@ def get_user_from_soap_service(snils: str):
 
 
 # === ФУНКЦИЯ: ОТПРАВКА ДАННЫХ В MAX-БОТА ===
-async def send_to_max_bot(user_id: str, user_data: dict):
+def _delete_user_file(user_id: str) -> None:
+    """Удаляет файл пользователя, если существует. Очистка от старых неудачных попыток."""
+    dir_path = ESIA_OBMEN_DIR or "/srv/esia_obmen"
+    file_path = os.path.join(dir_path, f"{user_id}.txt")
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            log_manager.log_sync("INFO", "Удалён устаревший файл перед новой попыткой")
+    except OSError:
+        pass
+
+
+async def send_to_max_bot(user_id: str, user_data):
     await log_manager.log("INFO", "Запрос на отправку в Max-бот")
 
-    dir_path = ESIA_OBMEN_DIR
+    dir_path = ESIA_OBMEN_DIR or "/srv/esia_obmen"
     file_path = os.path.join(dir_path, f"{user_id}.txt")
     # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     # ФИО; телефон; дата рождения; СНИЛС; ОМС; пол
@@ -131,6 +143,15 @@ async def send_to_max_bot(user_id: str, user_data: dict):
         except Exception:
             await log_manager.log("ERROR", "Ошибка парсинга XML")
 
+    # Не пишем файл с null-значениями — Max-бот требует обязательные поля (birth_date и др.)
+    if not user_data or birth_date == "null":
+        if not user_data:
+            await log_manager.log("WARNING", "Данные не получены (CAS/SOAP), запись в папку пропущена")
+        else:
+            await log_manager.log("WARNING", "Поле birth_date отсутствует в ответе RegUserService, запись пропущена")
+        await log_manager.log_unsuccessful_write()
+        return None
+
     line = f"{lastname} {firstname} {middlename},{phone},{birth_date},{snils},{policynumber},{gender}\n"
     try:
         with open(file_path, "w", encoding="utf-8") as f:
@@ -154,7 +175,9 @@ async def handle_callback(request):
     if not ticket or not user_id:
         await log_manager.log("WARNING", "Нет ticket или user_id")
         return web.Response(text="Нет ticket или user_id", status=400)
-    # logging.info(f"Получен ticket: {ticket}, user_id: {user_id}")#
+
+    # Очистка устаревшего файла от предыдущей неудачной попытки
+    _delete_user_file(user_id)
 
     # Шаг 1: Отправляем на валидацию ticket в CAS
     async with ClientSession() as session:
